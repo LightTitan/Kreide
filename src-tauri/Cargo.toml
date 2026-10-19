@@ -1,6 +1,6 @@
 [package]
 name = "kreide"
-version = "0.1.0"
+version = "0.2.0"
 description = "Temporary AI chats, one keystroke away"
 authors = ["Kreide"]
 license = "MIT"
