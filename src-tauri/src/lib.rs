@@ -89,6 +89,8 @@ struct Runtime {
     preferences: Mutex<Preferences>,
     active: Mutex<Option<Provider>>,
     hidden_at: Mutex<Option<SystemTime>>,
+    show_revision: AtomicU64,
+    show_pending: AtomicBool,
     /// Where the main window was when it was released, to rebuild it there.
     frame: Mutex<Option<(PhysicalPosition<i32>, PhysicalSize<u32>)>>,
     warning: Mutex<Option<String>>,
@@ -241,6 +243,26 @@ fn show(app: &AppHandle) {
     let Ok(window) = main_window(app).or_else(|_| rebuild_main(app)) else {
         return;
     };
+    let state = runtime(app);
+    let revision = state.show_revision.fetch_add(1, Ordering::Relaxed) + 1;
+    state.show_pending.store(true, Ordering::Relaxed);
+    // macOS queues native size/position changes even on the main thread.
+    // Reveal on that same queue after restoration, so the first visible frame
+    // already has its final geometry. No timer or extra animation is needed.
+    #[cfg(target_os = "macos")]
+    {
+        let app = app.clone();
+        dispatch2::DispatchQueue::main().exec_async(move || present_main(&app, window, revision));
+    }
+    #[cfg(not(target_os = "macos"))]
+    present_main(app, window, revision);
+}
+fn present_main(app: &AppHandle, window: tauri::Window, revision: u64) {
+    let state = runtime(app);
+    if state.show_revision.load(Ordering::Relaxed) != revision {
+        return;
+    }
+    state.show_pending.store(false, Ordering::Relaxed);
     // Coming back after a while means a new question: start from a clean slate.
     if stale(app) {
         close_all(app);
@@ -265,6 +287,9 @@ fn show(app: &AppHandle) {
     focus_composer(app);
 }
 fn hide(app: &AppHandle) {
+    // A second shortcut press must cancel a reveal that is still queued.
+    runtime(app).show_revision.fetch_add(1, Ordering::Relaxed);
+    runtime(app).show_pending.store(false, Ordering::Relaxed);
     if let Ok(window) = main_window(app) {
         let _ = window.hide();
         runtime(app)
@@ -289,8 +314,11 @@ fn release_main(app: &AppHandle) {
     let Ok(window) = main_window(app) else {
         return;
     };
-    if window.is_visible().unwrap_or(true)
-        || PROVIDERS.iter().any(|p| app.get_webview(p.label()).is_some())
+    if runtime(app).show_pending.load(Ordering::Relaxed)
+        || window.is_visible().unwrap_or(true)
+        || PROVIDERS
+            .iter()
+            .any(|p| app.get_webview(p.label()).is_some())
     {
         return;
     }
@@ -351,7 +379,11 @@ fn unload_unused(app: &AppHandle) {
         let handle = app.clone();
         let _ = app.run_on_main_thread(move || {
             // The user may have brought the window back while we asked.
-            if main_window(&handle).and_then(|w| w.is_visible().map_err(err)).unwrap_or(true) {
+            if runtime(&handle).show_pending.load(Ordering::Relaxed)
+                || main_window(&handle)
+                    .and_then(|w| w.is_visible().map_err(err))
+                    .unwrap_or(true)
+            {
                 return;
             }
             if !unused.is_empty() {
@@ -365,6 +397,10 @@ fn unload_unused(app: &AppHandle) {
     });
 }
 fn toggle(app: &AppHandle) {
+    if runtime(app).show_pending.load(Ordering::Relaxed) {
+        hide(app);
+        return;
+    }
     match main_window(app) {
         Ok(window) if window.is_visible().unwrap_or(false) && window.is_focused().unwrap_or(false) => {
             hide(app)
@@ -845,6 +881,8 @@ pub fn run() {
                 preferences: Mutex::new(preferences),
                 active: Mutex::new(None),
                 hidden_at: Mutex::new(None),
+                show_revision: AtomicU64::new(0),
+                show_pending: AtomicBool::new(false),
                 frame: Mutex::new(None),
                 warning: Mutex::new(warning),
             });
