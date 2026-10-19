@@ -327,6 +327,13 @@ fn release_main(app: &AppHandle) {
     }
     let _ = window.destroy();
 }
+/// Explicitly discard the session, bypassing the configured idle timeout.
+/// Release the toolbar too so it doesn't keep WebKit processes alive.
+fn end_chat_and_close(app: &AppHandle) {
+    close_all(app);
+    hide(app);
+    release_main(app);
+}
 fn rebuild_main(app: &AppHandle) -> Result<tauri::Window, String> {
     let mut config = app
         .config()
@@ -752,6 +759,10 @@ fn handle_menu(app: &AppHandle, id: &str) {
             hide(app);
             Ok(())
         }
+        "end" => {
+            end_chat_and_close(app);
+            Ok(())
+        }
         "quit" => {
             app.exit(0);
             Ok(())
@@ -802,6 +813,7 @@ fn app_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         true,
         &[
             &item("new", "New Temporary Chat", "CmdOrCtrl+N")?,
+            &item("end", "End Chat and Close", "CmdOrCtrl+Shift+W")?,
             &sep()?,
             &item("chatgpt", "ChatGPT", "CmdOrCtrl+1")?,
             &item("claude", "Claude", "CmdOrCtrl+2")?,
@@ -907,6 +919,7 @@ pub fn run() {
                 &[
                     &MenuItem::with_id(app, "show", "Open Kreide", true, None::<&str>)?,
                     &MenuItem::with_id(app, "new", "New Temporary Chat", true, None::<&str>)?,
+                    &MenuItem::with_id(app, "end", "End Chat and Close", true, None::<&str>)?,
                     &PredefinedMenuItem::separator(app)?,
                     &MenuItem::with_id(app, "chatgpt", "ChatGPT", true, None::<&str>)?,
                     &MenuItem::with_id(app, "claude", "Claude", true, None::<&str>)?,

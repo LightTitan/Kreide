@@ -19,7 +19,7 @@ Use your existing accounts and subscriptions. No API key is required.
 
 Select ChatGPT or Claude and sign in within Kreide. Press ⌘⇧Space on macOS or Ctrl+Shift+Space on Windows and Linux to show or hide the window.
 
-Closing the window keeps Kreide running in the background. Select End chat to end the current conversation, or Quit Kreide from the tray menu to exit. Settings include the default provider, chat timeout, and window preferences.
+Closing the window keeps Kreide running in the background. Press ⌘⇧W on macOS or Ctrl+Shift+W on Windows and Linux (Chat → End Chat and Close) to immediately end the chat, close its webviews, and release the main window, regardless of the chat timeout. Your sign-in is preserved; reopening Kreide starts a fresh chat. Memory reclamation is managed by the operating system, not a secure memory wipe. Select Quit Kreide from the tray menu to exit. Settings include the default provider, chat timeout, and window preferences.
 
 ## Build and run
 
