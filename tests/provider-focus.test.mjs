@@ -8,9 +8,104 @@ function page(host = 'chatgpt.com', html = '') {
   // jsdom has no layout engine. Mark fixture elements visible unless explicitly hidden.
   dom.window.Element.prototype.getClientRects = function () { return this.closest('[hidden]') ? [] : [{ width: 10, height: 10 }]; };
   dom.window.eval(script);
+  // Simulate navigation lifecycle before tearing down jsdom's document.
+  const close = dom.window.close.bind(dom.window);
+  dom.window.close = () => { dom.window.dispatchEvent(new dom.window.Event('pagehide')); close(); };
   return dom.window;
 }
 const tick = () => new Promise(resolve => setTimeout(resolve, 0));
+
+test('collapses ChatGPT sidebar on load without preventing manual reopening', async () => {
+  const w = page('chatgpt.com', '<button aria-label="Close sidebar"></button>');
+  const toggle = w.document.querySelector('button');
+  let clicks = 0;
+  toggle.addEventListener('click', () => {
+    clicks++;
+    toggle.setAttribute('aria-label', clicks % 2 ? 'Open sidebar' : 'Close sidebar');
+  });
+  await tick();
+  assert.equal(clicks, 1);
+  toggle.click();
+  await tick();
+  assert.equal(clicks, 2);
+  assert.equal(toggle.getAttribute('aria-label'), 'Close sidebar');
+  w.close();
+});
+test('collapses a ChatGPT sidebar mounted after the composer', async () => {
+  const w = page('chatgpt.com', '<textarea id="prompt-textarea"></textarea>');
+  await tick();
+  const toggle = w.document.createElement('button');
+  toggle.dataset.testid = 'close-sidebar-button';
+  let clicks = 0;
+  toggle.addEventListener('click', () => { clicks++; toggle.dataset.testid = 'open-sidebar-button'; });
+  w.document.body.append(toggle);
+  await tick();
+  assert.equal(clicks, 1);
+  w.document.body.append(w.document.createElement('div'));
+  await tick();
+  assert.equal(clicks, 1);
+  w.close();
+});
+test('retries an early click until the sidebar actually collapses, then stops', async () => {
+  const w = page('chatgpt.com', '<button aria-label="Close sidebar"></button>');
+  const toggle = w.document.querySelector('button');
+  let ready = false;
+  let clicks = 0;
+  toggle.addEventListener('click', () => {
+    clicks++;
+    if (ready) toggle.setAttribute('aria-label', 'Open sidebar');
+  });
+  await tick();
+  assert.equal(toggle.getAttribute('aria-label'), 'Close sidebar');
+  ready = true;
+  const deadline = Date.now() + 1500;
+  while (toggle.getAttribute('aria-label') !== 'Open sidebar' && Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  assert.equal(toggle.getAttribute('aria-label'), 'Open sidebar');
+  const completedClicks = clicks;
+  // Manual reopening after success must not restart the watcher.
+  toggle.setAttribute('aria-label', 'Close sidebar');
+  await new Promise(resolve => setTimeout(resolve, 300));
+  assert.equal(clicks, completedClicks);
+  w.close();
+});
+test('stops automation when the user operates the sidebar during startup', async () => {
+  const w = page('chatgpt.com', '<button aria-label="Close sidebar"></button>');
+  const toggle = w.document.querySelector('button');
+  let clicks = 0;
+  toggle.addEventListener('click', () => { clicks++; });
+  await tick();
+  toggle.dispatchEvent(new w.Event('pointerdown', { bubbles: true }));
+  const previousClicks = clicks;
+  await new Promise(resolve => setTimeout(resolve, 300));
+  assert.equal(clicks, previousClicks);
+  w.close();
+});
+test('leaves an initially collapsed sidebar available to open', async () => {
+  const w = page('chatgpt.com', '<button aria-label="Open sidebar"></button>');
+  await tick();
+  const toggle = w.document.querySelector('button');
+  let clicks = 0;
+  toggle.addEventListener('click', () => { clicks++; });
+  toggle.setAttribute('aria-label', 'Close sidebar');
+  await tick();
+  assert.equal(clicks, 0);
+  w.close();
+});
+test('does not collapse Claude sidebar or click hidden ChatGPT controls', async () => {
+  for (const [host, html] of [
+    ['claude.ai', '<button aria-label="Close sidebar"></button>'],
+    ['chatgpt.com', '<div hidden><button aria-label="Close sidebar"></button></div>'],
+  ]) {
+    const w = page(host, html);
+    let clicks = 0;
+    w.document.querySelector('button').addEventListener('click', () => { clicks++; });
+    await tick();
+    assert.equal(clicks, 0);
+    w.close();
+  }
+});
 
 test('focuses the composer on load', () => {
   const w = page('claude.ai', '<div contenteditable="true"></div>');
