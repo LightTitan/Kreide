@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
+    io::Write,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         Mutex,
@@ -24,6 +25,10 @@ const TOOLBAR: f64 = 44.0;
 const SHORTCUT: &str = "CommandOrControl+Shift+Space";
 static POPUP_ID: AtomicU64 = AtomicU64::new(0);
 const FOCUS_SCRIPT: &str = include_str!("provider-focus.js");
+// Google's published domain set, retrieved 2026-10-19. Vendor it so sign-in
+// doesn't depend on a separate network fetch or a guessed country-code pattern.
+// Source/update URL: https://www.google.com/supported_domains
+const GOOGLE_DOMAINS: &str = include_str!("google-domains.txt");
 const PROVIDERS: [Provider; 2] = [Provider::Chatgpt, Provider::Claude];
 /// `fresh_after_minutes` value that ends the chat as soon as the window hides.
 const FRESH_IMMEDIATELY: u32 = u32::MAX;
@@ -530,13 +535,30 @@ fn allowed_navigation(url: &tauri::Url) -> bool {
         return false;
     }
     let host = url.host_str().unwrap_or_default();
+    // Google sign-in uses regional account frames as well as accounts.google.com.
+    // Match the exact accounts host on every published Google domain, including
+    // multi-label suffixes such as google.co.uk and google.com.au.
+    if host
+        .strip_prefix("accounts.")
+        .is_some_and(|domain| GOOGLE_DOMAINS.lines().any(|known| known == domain))
+    {
+        return true;
+    }
+    // Google's password step can depend on reCAPTCHA subframes. The native
+    // navigation callback also filters iframes, so allowing accounts.google.com
+    // alone is insufficient. Keep these exceptions limited to reCAPTCHA paths.
+    // https://developers.google.com/recaptcha/docs/faq
+    if matches!(host, "www.google.com" | "www.recaptcha.net")
+        && url.path().starts_with("/recaptcha/")
+    {
+        return true;
+    }
     [
         "chatgpt.com",
         "openai.com",
         "claude.ai",
         "claude.com",
         "anthropic.com",
-        "accounts.google.com",
         "appleid.apple.com",
         "account.apple.com",
         "login.microsoftonline.com",
@@ -550,18 +572,62 @@ fn allowed_navigation(url: &tauri::Url) -> bool {
     .any(|domain| host == *domain || host.ends_with(&format!(".{domain}")))
 }
 
+fn navigation_origin(url: &tauri::Url) -> String {
+    // Never log paths, queries, fragments, or userinfo: auth URLs carry tokens.
+    let origin = url.origin().ascii_serialization();
+    if origin == "null" {
+        format!("{}:", url.scheme())
+    } else {
+        origin
+    }
+}
+
+fn filter_navigation(app: &AppHandle, provider: Provider, url: &tauri::Url) -> bool {
+    if allowed_navigation(url) {
+        return true;
+    }
+    let time = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let message = format!(
+        "{time} {}: blocked navigation to {}\n",
+        provider.label(),
+        navigation_origin(url)
+    );
+    eprint!("{message}");
+    // Bundled apps usually have no terminal. Keep a bounded, origin-only log
+    // so a failed sign-in can be diagnosed without collecting credentials.
+    if let Ok(dir) = app.path().app_log_dir() {
+        if fs::create_dir_all(&dir).is_ok() {
+            if let Ok(mut file) = fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(dir.join("navigation.log"))
+            {
+                if file.metadata().is_ok_and(|metadata| metadata.len() >= 64 * 1024) {
+                    let _ = file.set_len(0);
+                }
+                let _ = file.write_all(message.as_bytes());
+            }
+        }
+    }
+    false
+}
+
 fn create_view(app: &AppHandle, provider: Provider, url: &str) -> Result<(), String> {
     let window = main_window(app)?;
     let (position, size) = provider_bounds(app)?;
     let popup_app = app.clone();
+    let navigation_app = app.clone();
     let mut builder = WebviewBuilder::new(
         provider.label(),
         WebviewUrl::External(url.parse().map_err(err)?),
     )
     .initialization_script(FOCUS_SCRIPT)
-    .on_navigation(allowed_navigation)
+    .on_navigation(move |url| filter_navigation(&navigation_app, provider, url))
     .on_new_window(move |url, features| {
-        if !allowed_navigation(&url) {
+        if !filter_navigation(&popup_app, provider, &url) {
             return NewWindowResponse::Deny;
         }
         let label = format!(
@@ -569,6 +635,7 @@ fn create_view(app: &AppHandle, provider: Provider, url: &str) -> Result<(), Str
             provider.label(),
             POPUP_ID.fetch_add(1, Ordering::SeqCst)
         );
+        let navigation_app = popup_app.clone();
         let mut popup = tauri::WebviewWindowBuilder::new(
             &popup_app,
             label,
@@ -576,7 +643,7 @@ fn create_view(app: &AppHandle, provider: Provider, url: &str) -> Result<(), Str
         )
         .title("Kreide · Sign in")
         .window_features(features)
-        .on_navigation(allowed_navigation)
+        .on_navigation(move |url| filter_navigation(&navigation_app, provider, url))
         .initialization_script(FOCUS_SCRIPT);
         #[cfg(target_os = "macos")]
         {
@@ -1142,10 +1209,84 @@ mod tests {
             "https://hcaptcha.com.evil.test/",
             "https://challenges.cloudflare.com.evil.test/",
             "https://unrelated.cloudflare.com/",
+            "https://accounts.google.com.evil.test/",
+            "https://evilaccounts.google.com/",
+            "https://www.google.com/",
+            "http://accounts.google.com/",
             "file:///etc/passwd",
             "tauri://localhost",
         ] {
             assert!(!allowed_navigation(&url.parse().unwrap()));
+        }
+    }
+    #[test]
+    fn google_accounts_support_every_published_region_with_exact_hosts() {
+        for domain in GOOGLE_DOMAINS.lines() {
+            let allowed = format!("https://accounts.{domain}/CheckConnection?test=1");
+            assert!(allowed_navigation(&allowed.parse().unwrap()), "{allowed}");
+            for blocked in [
+                format!("http://accounts.{domain}/"),
+                format!("https://accounts.{domain}.evil.test/"),
+                format!("https://evilaccounts.{domain}/"),
+                format!("https://evil.accounts.{domain}/"),
+                format!("https://www.{domain}/"),
+                format!("https://{domain}/"),
+            ] {
+                assert!(!allowed_navigation(&blocked.parse().unwrap()), "{blocked}");
+            }
+        }
+        // Explicit regressions for different regional suffix shapes.
+        for region in ["de", "fr", "co.uk", "com.au", "co.jp", "co.in", "com.br"] {
+            let url = format!("https://accounts.google.{region}/");
+            assert!(allowed_navigation(&url.parse().unwrap()), "{url}");
+        }
+        for url in [
+            "https://accounts.google.evil/",
+            "https://accounts.google.invalid/",
+            "https://accounts.google.com@evil.test/",
+        ] {
+            assert!(!allowed_navigation(&url.parse().unwrap()), "{url}");
+        }
+    }
+    #[test]
+    fn google_verification_is_limited_to_https_recaptcha_paths() {
+        for host in ["www.google.com", "www.recaptcha.net"] {
+            for path in [
+                "/recaptcha/api2/anchor?k=test",
+                "/recaptcha/api2/bframe",
+                "/recaptcha/enterprise/anchor?k=test",
+                "/recaptcha/enterprise/bframe",
+            ] {
+                let url = format!("https://{host}{path}").parse().unwrap();
+                assert!(allowed_navigation(&url), "{url}");
+            }
+        }
+        for url in [
+            "http://www.google.com/recaptcha/api2/anchor",
+            "https://www.google.com/",
+            "https://www.google.com/search?q=recaptcha",
+            "https://www.google.com/recaptcha-evil/anchor",
+            "https://www.google.com/recaptcha/../search",
+            "https://www.google.com.evil.test/recaptcha/api2/anchor",
+            "https://www.recaptcha.net.evil.test/recaptcha/api2/anchor",
+            "https://www.recaptcha.net/other",
+            "https://evil.test/recaptcha/api2/anchor",
+        ] {
+            assert!(!allowed_navigation(&url.parse().unwrap()), "{url}");
+        }
+    }
+    #[test]
+    fn navigation_diagnostics_exclude_sign_in_secrets() {
+        let url = "https://user:password@blocked.test/private-token?code=secret#token"
+            .parse()
+            .unwrap();
+        assert_eq!(navigation_origin(&url), "https://blocked.test");
+        for (url, expected) in [
+            ("file:///private/token", "file:"),
+            ("data:text/plain,secret", "data:"),
+            ("about:blank#secret", "about:"),
+        ] {
+            assert_eq!(navigation_origin(&url.parse().unwrap()), expected);
         }
     }
     #[test]
