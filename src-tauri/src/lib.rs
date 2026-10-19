@@ -736,8 +736,15 @@ async fn boot(app: AppHandle, webview: tauri::Webview, viewport: Viewport) -> Re
             *inset = Some((native.height - viewport.height).max(0.0));
         }
     }
-    if runtime(&app).active.lock().unwrap().is_none() {
-        let provider = runtime(&app).preferences.lock().unwrap().default_provider;
+    // Reopen the last provider (or the default after a fresh start) if its
+    // page was unloaded while hidden. On macOS `present_main` defers this to
+    // us for a rebuilt toolbar, so a remembered but closed provider must open.
+    let provider = runtime(&app)
+        .active
+        .lock()
+        .unwrap()
+        .unwrap_or_else(|| runtime(&app).preferences.lock().unwrap().default_provider);
+    if app.get_webview(provider.label()).is_none() {
         select(&app, provider)?;
     }
     fit(&app);
