@@ -1,0 +1,6 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main", "description": "Only the bundled Kreide controls (toolbar and settings) get IPC. Provider pages get nothing.",
+  "local": true, "webviews": ["main", "settings"],
+  "permissions": ["core:event:allow-listen", "core:event:allow-unlisten", "core:window:allow-start-dragging", "core:window:allow-close"]
+}
