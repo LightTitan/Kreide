@@ -22,8 +22,9 @@
     // Use ChatGPT's own toggle so the chat expands into the available space.
     // Stop once closed (or already collapsed), allowing manual reopening.
     if (location.hostname === 'chatgpt.com') {
-      const closeSelector = 'button[aria-label="Close sidebar" i], button[data-testid="close-sidebar-button"]';
-      const openSelector = 'button[aria-label="Open sidebar" i], button[data-testid="open-sidebar-button"]';
+      // Signed-in ChatGPT uses Hide/Show; the signed-out page uses Close/Open.
+      const closeSelector = 'button[aria-label="Close sidebar" i], button[aria-label="Hide sidebar" i], button[data-testid="close-sidebar-button"]';
+      const openSelector = 'button[aria-label="Open sidebar" i], button[aria-label="Show sidebar" i], button[data-testid="open-sidebar-button"]';
       // Server-rendered controls can appear before their click handlers work.
       // Confirm the collapsed state instead of treating a click as success.
       let lastClick = -Infinity;

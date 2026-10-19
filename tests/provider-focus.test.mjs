@@ -15,6 +15,55 @@ function page(host = 'chatgpt.com', html = '') {
 }
 const tick = () => new Promise(resolve => setTimeout(resolve, 0));
 
+test('collapses the authenticated Hide sidebar control after it mounts and permits manual reopening', async () => {
+  const w = page('chatgpt.com', '<textarea id="prompt-textarea"></textarea><div hidden><button aria-label="Close sidebar"></button></div>');
+  await tick();
+  const toggle = w.document.createElement('button');
+  toggle.setAttribute('aria-label', 'Hide sidebar');
+  toggle.setAttribute('aria-expanded', 'true');
+  let clicks = 0;
+  toggle.addEventListener('click', () => {
+    clicks++;
+    const expanded = toggle.getAttribute('aria-expanded') === 'true';
+    toggle.setAttribute('aria-expanded', String(!expanded));
+    toggle.setAttribute('aria-label', expanded ? 'Show sidebar' : 'Hide sidebar');
+  });
+  w.document.body.append(toggle);
+  await tick();
+  assert.equal(toggle.getAttribute('aria-label'), 'Show sidebar');
+  assert.equal(toggle.getAttribute('aria-expanded'), 'false');
+  assert.equal(clicks, 1);
+  toggle.dispatchEvent(new w.Event('pointerdown', { bubbles: true }));
+  toggle.click();
+  await tick();
+  assert.equal(toggle.getAttribute('aria-label'), 'Hide sidebar');
+  assert.equal(clicks, 2);
+  w.close();
+});
+test('recognizes an initially collapsed authenticated Show sidebar control', async () => {
+  const w = page('chatgpt.com', '<button aria-label="Show sidebar"></button>');
+  await tick();
+  const toggle = w.document.querySelector('button');
+  let clicks = 0;
+  toggle.addEventListener('click', () => { clicks++; });
+  toggle.setAttribute('aria-label', 'Hide sidebar');
+  await tick();
+  assert.equal(clicks, 0);
+  w.close();
+});
+test('honors manual keyboard operation of the authenticated toggle before it is ready', async () => {
+  const w = page('chatgpt.com', '<button aria-label="Hide sidebar"></button>');
+  const toggle = w.document.querySelector('button');
+  let clicks = 0;
+  toggle.addEventListener('click', () => { clicks++; });
+  await tick();
+  toggle.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+  const previousClicks = clicks;
+  await new Promise(resolve => setTimeout(resolve, 300));
+  assert.equal(clicks, previousClicks);
+  w.close();
+});
+
 test('collapses ChatGPT sidebar on load without preventing manual reopening', async () => {
   const w = page('chatgpt.com', '<button aria-label="Close sidebar"></button>');
   const toggle = w.document.querySelector('button');
