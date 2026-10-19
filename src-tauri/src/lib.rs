@@ -470,9 +470,10 @@ fn allowed_navigation(url: &tauri::Url) -> bool {
         "account.apple.com",
         "login.microsoftonline.com",
         "login.live.com",
-        // Claude's bot-check iframes. wry runs this filter on subframes too,
-        // so blocking these fails sign-in with "Couldn't verify your browser".
+        // Bot-check iframes. wry runs this filter on subframes too, so
+        // blocking these can prevent authentication from completing.
         "hcaptcha.com",
+        "challenges.cloudflare.com",
     ]
     .iter()
     .any(|domain| host == *domain || host.ends_with(&format!(".{domain}")))
@@ -1015,6 +1016,7 @@ mod tests {
             "https://claude.ai/new?incognito",
             "https://accounts.google.com/",
             "https://newassets.hcaptcha.com/captcha/v1/abc/static/hcaptcha.html#frame=checkbox-invisible",
+            "https://challenges.cloudflare.com/turnstile/v0/iframe",
             "about:srcdoc",
         ] {
             assert!(allowed_navigation(&url.parse().unwrap()));
@@ -1024,6 +1026,8 @@ mod tests {
             "https://chatgpt.com.evil.test",
             "https://evilclaude.ai",
             "https://hcaptcha.com.evil.test/",
+            "https://challenges.cloudflare.com.evil.test/",
+            "https://unrelated.cloudflare.com/",
             "file:///etc/passwd",
             "tauri://localhost",
         ] {
