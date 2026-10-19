@@ -86,6 +86,8 @@ struct Viewport {
 
 struct Runtime {
     viewport: Mutex<Viewport>,
+    #[cfg(target_os = "macos")]
+    toolbar_inset: Mutex<Option<f64>>,
     preferences: Mutex<Preferences>,
     active: Mutex<Option<Provider>>,
     hidden_at: Mutex<Option<SystemTime>>,
@@ -147,6 +149,23 @@ fn provider_bounds(app: &AppHandle) -> Result<(LogicalPosition<f64>, LogicalSize
     let origin = main.position().map_err(err)?.to_logical::<f64>(scale);
     let size = main.size().map_err(err)?.to_logical::<f64>(scale);
     let viewport = *runtime(app).viewport.lock().unwrap();
+    #[cfg(target_os = "macos")]
+    if let Some(inset) = *runtime(app).toolbar_inset.lock().unwrap() {
+        // The local view is only toolbar-height now. Size the chat from the
+        // window, never from that view's reduced CSS viewport.
+        let window_size = main_window(app)?
+            .inner_size()
+            .map_err(err)?
+            .to_logical::<f64>(scale);
+        return Ok(content_bounds(
+            origin,
+            window_size,
+            Viewport {
+                width: window_size.width,
+                height: (window_size.height - inset).max(1.0),
+            },
+        ));
+    }
     Ok(content_bounds(origin, size, viewport))
 }
 fn content_bounds(
@@ -174,6 +193,8 @@ fn update_viewport(app: &AppHandle, viewport: Viewport) -> Result<(), String> {
     Ok(())
 }
 fn fit(app: &AppHandle) {
+    #[cfg(target_os = "macos")]
+    fit_toolbar(app);
     if let Ok((position, size)) = provider_bounds(app) {
         for provider in PROVIDERS {
             if let Some(view) = app.get_webview(provider.label()) {
@@ -182,6 +203,39 @@ fn fit(app: &AppHandle) {
             }
         }
     }
+}
+
+#[cfg(target_os = "macos")]
+fn fit_toolbar(app: &AppHandle) {
+    let Some(inset) = *runtime(app).toolbar_inset.lock().unwrap() else {
+        return; // Wait for the first CSS viewport measurement after boot.
+    };
+    let (Some(main), Ok(window)) = (app.get_webview("main"), main_window(app)) else {
+        return;
+    };
+    let (Ok(size), Ok(scale)) = (window.inner_size(), window.scale_factor()) else {
+        return;
+    };
+    let size = size.to_logical::<f64>(scale);
+    let loaded = PROVIDERS
+        .iter()
+        .any(|p| app.get_webview(p.label()).is_some());
+    // With Tauri's unstable multiwebview runtime the initial webview is a
+    // native child too. Disable proportional resizing and lay it out ourselves.
+    let _ = main.set_auto_resize(false);
+    let _ = main.set_size(toolbar_size(size, inset, loaded));
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn toolbar_size(window: LogicalSize<f64>, inset: f64, loaded: bool) -> LogicalSize<f64> {
+    LogicalSize::new(
+        window.width,
+        if loaded {
+            (TOOLBAR + inset).min(window.height)
+        } else {
+            window.height
+        },
+    )
 }
 
 fn focus_composer(app: &AppHandle) {
@@ -272,6 +326,12 @@ fn present_main(app: &AppHandle, window: tauri::Window, revision: u64) {
     let _ = window.unminimize();
     let _ = window.show();
     let _ = window.set_focus();
+    // A rebuilt toolbar first measures the title-bar inset in `boot`, then
+    // opens the provider. Don't use the previous toolbar's 44px viewport.
+    #[cfg(target_os = "macos")]
+    if runtime(app).toolbar_inset.lock().unwrap().is_none() {
+        return;
+    }
     // Reopen the last provider (or the default after a fresh start) if its
     // page was unloaded while hidden.
     let provider = runtime(app)
@@ -335,6 +395,10 @@ fn end_chat_and_close(app: &AppHandle) {
     release_main(app);
 }
 fn rebuild_main(app: &AppHandle) -> Result<tauri::Window, String> {
+    #[cfg(target_os = "macos")]
+    {
+        *runtime(app).toolbar_inset.lock().unwrap() = None;
+    }
     let mut config = app
         .config()
         .app
@@ -595,10 +659,21 @@ fn get_state(app: AppHandle, webview: tauri::Webview) -> Result<Snapshot, String
 async fn boot(app: AppHandle, webview: tauri::Webview, viewport: Viewport) -> Result<Snapshot, String> {
     trusted(&webview)?;
     update_viewport(&app, viewport)?;
+    #[cfg(target_os = "macos")]
+    {
+        let state = runtime(&app);
+        let mut inset = state.toolbar_inset.lock().unwrap();
+        if inset.is_none() {
+            let scale = main_window(&app)?.scale_factor().map_err(err)?;
+            let native = webview.size().map_err(err)?.to_logical::<f64>(scale);
+            *inset = Some((native.height - viewport.height).max(0.0));
+        }
+    }
     if runtime(&app).active.lock().unwrap().is_none() {
         let provider = runtime(&app).preferences.lock().unwrap().default_provider;
         select(&app, provider)?;
     }
+    fit(&app);
     let result = snapshot(&app);
     // Report the startup warning once, not on every window rebuild.
     *runtime(&app).warning.lock().unwrap() = None;
@@ -887,6 +962,8 @@ pub fn run() {
                 .unwrap()
                 .set_always_on_top(preferences.always_on_top)?;
             app.manage(Runtime {
+                #[cfg(target_os = "macos")]
+                toolbar_inset: Mutex::new(None),
                 viewport: Mutex::new(Viewport {
                     width: 1236.0,
                     height: 852.0,
@@ -1020,6 +1097,30 @@ mod tests {
         );
         assert_eq!(position.y, TOOLBAR);
         assert_eq!(size.height, 760.0 - TOOLBAR);
+    }
+    #[test]
+    fn toolbar_and_chat_do_not_overlap_after_resize() {
+        for (width, height, inset) in [
+            (960.0, 760.0, 28.0),
+            (1440.0, 900.0, 28.0),
+            (800.0, 600.0, 0.0),
+        ] {
+            let window = LogicalSize::new(width, height);
+            let toolbar = toolbar_size(window, inset, true);
+            let (position, chat) = content_bounds(
+                LogicalPosition::new(0.0, 0.0),
+                window,
+                Viewport {
+                    width,
+                    height: height - inset,
+                },
+            );
+            assert_eq!(toolbar.height, position.y);
+            assert_eq!(toolbar.width, chat.width);
+            assert_eq!(position.y + chat.height, height);
+            // A loading failure needs the full local error/retry page.
+            assert_eq!(toolbar_size(window, inset, false), window);
+        }
     }
     #[test]
     fn navigation_is_https_and_domain_scoped() {
