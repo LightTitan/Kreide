@@ -488,13 +488,18 @@ fn close_view(app: &AppHandle, provider: Provider) -> Result<(), String> {
     if let Some(view) = app.get_webview(provider.label()) {
         // Queued before the close, so it still sees the live page.
         #[cfg(target_os = "macos")]
-        let _ = view.with_webview(|webview| resign_focus(webview.inner()));
+        let _ = view.with_webview(|webview| {
+            resign_focus(webview.inner());
+            close_page(webview.inner());
+        });
         view.close().map_err(err)?;
     }
     // Popups belong to this session and must not outlive it.
     let prefix = format!("auth-{}-", provider.label());
     for (label, window) in app.webview_windows() {
         if label.starts_with(&prefix) {
+            #[cfg(target_os = "macos")]
+            let _ = window.with_webview(|webview| close_page(webview.inner()));
             window.destroy().map_err(err)?;
         }
     }
@@ -523,6 +528,21 @@ fn resign_focus(webview: *mut std::ffi::c_void) {
     let focused = window.firstResponder().and_then(|r| r.downcast::<NSView>().ok());
     if focused.is_some_and(|view| view.isDescendantOf(webview)) {
         window.makeFirstResponder(None);
+    }
+}
+/// AppKit holds other references to a removed view too: a destroyed window
+/// leaks and keeps the last scrolled view in `_latchedViewForScrollEvents`.
+/// Close the page itself so WebKit ends its WebContent process even if the
+/// WKWebView object is never freed. `_close` is WebKit SPI, as used by Safari.
+#[cfg(target_os = "macos")]
+fn close_page(webview: *mut std::ffi::c_void) {
+    use objc2::{msg_send, runtime::NSObject, sel};
+    let Some(webview) = (unsafe { webview.cast::<NSObject>().as_ref() }) else {
+        return;
+    };
+    let responds: bool = unsafe { msg_send![webview, respondsToSelector: sel!(_close)] };
+    if responds {
+        let _: () = unsafe { msg_send![webview, _close] };
     }
 }
 fn allowed_navigation(url: &tauri::Url) -> bool {

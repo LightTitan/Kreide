@@ -1700,6 +1700,7 @@ name = "kreide"
 version = "0.2.1"
 dependencies = [
  "dispatch2",
+ "objc2",
  "objc2-app-kit",
  "objc2-foundation",
  "serde",
