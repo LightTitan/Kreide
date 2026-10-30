@@ -19,6 +19,8 @@ use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
 #[cfg(target_os = "macos")]
 mod macos_activation;
+#[cfg(target_os = "macos")]
+mod macos_clipboard;
 
 /// Height of the local toolbar drawn above the provider page.
 const TOOLBAR: f64 = 44.0;
@@ -634,6 +636,57 @@ fn filter_navigation(app: &AppHandle, provider: Provider, url: &tauri::Url) -> b
     false
 }
 
+/// WKWebView's default user agent has no Safari token, so providers can't
+/// tell it apart from an unknown browser. Present as the Safari that ships
+/// this WebKit, in Safari's frozen user-agent format.
+#[cfg(target_os = "macos")]
+fn safari_user_agent() -> String {
+    use objc2_foundation::{NSBundle, NSString};
+    let version = NSBundle::bundleWithPath(&NSString::from_str("/Applications/Safari.app"))
+        .and_then(|bundle| {
+            bundle.objectForInfoDictionaryKey(&NSString::from_str("CFBundleShortVersionString"))
+        })
+        .and_then(|version| version.downcast::<NSString>().ok())
+        .map(|version| version.to_string())
+        .filter(|v| !v.is_empty() && v.chars().all(|c| c.is_ascii_digit() || c == '.'))
+        .unwrap_or_else(|| "18.6".into());
+    format!(
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 \
+         (KHTML, like Gecko) Version/{version} Safari/605.1.15"
+    )
+}
+/// AppKit still offers drags to a hidden view, so a file dropped on the shown
+/// chat can land in the hidden one. Withdraw a hidden page's drag types and
+/// give WebKit's types back when it is shown again.
+#[cfg(target_os = "macos")]
+fn set_drop_target(webview: *mut std::ffi::c_void, enabled: bool) {
+    use objc2::rc::Retained;
+    use objc2_app_kit::{NSPasteboardType, NSView};
+    use objc2_foundation::NSArray;
+    use std::cell::RefCell;
+    thread_local! {
+        // Every WKWebView registers the same types. with_webview runs on the
+        // main thread, so this is only touched there.
+        static TYPES: RefCell<Option<Retained<NSArray<NSPasteboardType>>>> = const { RefCell::new(None) };
+    }
+    let Some(webview) = (unsafe { webview.cast::<NSView>().as_ref() }) else {
+        return;
+    };
+    let registered = webview.registeredDraggedTypes();
+    if !registered.is_empty() {
+        TYPES.with_borrow_mut(|types| *types = Some(registered.clone()));
+    }
+    if !enabled {
+        webview.unregisterDraggedTypes();
+    } else if registered.is_empty() {
+        TYPES.with_borrow(|types| {
+            if let Some(types) = types {
+                webview.registerForDraggedTypes(types);
+            }
+        });
+    }
+}
+
 fn create_view(app: &AppHandle, provider: Provider, url: &str) -> Result<(), String> {
     let window = main_window(app)?;
     let (position, size) = provider_bounds(app)?;
@@ -644,6 +697,9 @@ fn create_view(app: &AppHandle, provider: Provider, url: &str) -> Result<(), Str
         WebviewUrl::External(url.parse().map_err(err)?),
     )
     .initialization_script(FOCUS_SCRIPT)
+    // Tauri's handler claims every file drop to emit its own event, so the
+    // page never receives it. Let WebKit deliver drops to the provider.
+    .disable_drag_drop_handler()
     .on_navigation(move |url| filter_navigation(&navigation_app, provider, url))
     .on_new_window(move |url, features| {
         if !filter_navigation(&popup_app, provider, &url) {
@@ -662,11 +718,14 @@ fn create_view(app: &AppHandle, provider: Provider, url: &str) -> Result<(), Str
         )
         .title("Kreide · Sign in")
         .window_features(features)
+        .disable_drag_drop_handler()
         .on_navigation(move |url| filter_navigation(&navigation_app, provider, url))
         .initialization_script(FOCUS_SCRIPT);
         #[cfg(target_os = "macos")]
         {
-            popup = popup.data_store_identifier(provider.store());
+            popup = popup
+                .data_store_identifier(provider.store())
+                .user_agent(&safari_user_agent());
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -681,7 +740,9 @@ fn create_view(app: &AppHandle, provider: Provider, url: &str) -> Result<(), Str
     });
     #[cfg(target_os = "macos")]
     {
-        builder = builder.data_store_identifier(provider.store());
+        builder = builder
+            .data_store_identifier(provider.store())
+            .user_agent(&safari_user_agent());
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -716,6 +777,8 @@ fn select(app: &AppHandle, provider: Provider) -> Result<(), String> {
             } else {
                 view.hide().map_err(err)?;
             }
+            #[cfg(target_os = "macos")]
+            let _ = view.with_webview(move |webview| set_drop_target(webview.inner(), other == provider));
         }
     }
     *runtime(app).active.lock().unwrap() = Some(provider);
@@ -1069,6 +1132,8 @@ pub fn run() {
                 frame: Mutex::new(None),
                 warning: Mutex::new(warning),
             });
+            #[cfg(target_os = "macos")]
+            macos_clipboard::install(app.handle().clone());
             // Unload idle chats in the background so a hidden app costs little.
             let handle = app.handle().clone();
             std::thread::spawn(move || loop {
