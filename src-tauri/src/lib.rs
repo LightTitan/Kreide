@@ -331,8 +331,8 @@ fn present_main(app: &AppHandle, window: tauri::Window, revision: u64) {
     let _ = window.unminimize();
     let _ = window.show();
     let _ = window.set_focus();
-    // A rebuilt toolbar first measures the title-bar inset in `boot`, then
-    // opens the provider. Don't use the previous toolbar's 44px viewport.
+    // Until the toolbar has measured the title-bar inset once in `boot`, let
+    // `boot` open the provider. Don't size it from a stale CSS viewport.
     #[cfg(target_os = "macos")]
     if runtime(app).toolbar_inset.lock().unwrap().is_none() {
         return;
@@ -400,10 +400,9 @@ fn end_chat_and_close(app: &AppHandle) {
     release_main(app);
 }
 fn rebuild_main(app: &AppHandle) -> Result<tauri::Window, String> {
-    #[cfg(target_os = "macos")]
-    {
-        *runtime(app).toolbar_inset.lock().unwrap() = None;
-    }
+    // Keep the measured title-bar inset: the rebuilt window has the same
+    // chrome, and keeping it lets `present_main` open the provider right away
+    // instead of waiting for the toolbar page to load and call `boot`.
     let mut config = app
         .config()
         .app
